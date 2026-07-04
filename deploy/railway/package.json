@@ -1,0 +1,19 @@
+{
+  "name": "shan-server",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "author": "paingzinhtet",
+  "license": "ISC",
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "body-parser": "^1.20.2",
+    "express": "^4.18.2",
+    "lodash": "^4.17.21",
+    "mongodb": "^3.7.3",
+    "shortid": "^2.2.16",
+    "socket.io": "^2.5.0"
+  }
+}

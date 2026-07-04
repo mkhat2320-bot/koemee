@@ -1,0 +1,40 @@
+{
+  "project_info": {
+    "project_number": "527832538050",
+    "firebase_url": "https://teenpatti-6714a.firebaseio.com",
+    "project_id": "teenpatti-6714a",
+    "storage_bucket": "teenpatti-6714a.appspot.com"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:527832538050:android:60d64d92f1ff7f7987945b",
+        "android_client_info": {
+          "package_name": "com.teenpatticc.teenpatticc"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "527832538050-c4pf89luebiffuuui6nts897k0fmb9hn.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDdNoi95xZAlTHigf6IDVAYhNYd3Kp6PDU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "527832538050-c4pf89luebiffuuui6nts897k0fmb9hn.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
