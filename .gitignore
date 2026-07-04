@@ -1,27 +1,3 @@
-# Dependencies
 node_modules/
-
-# Unity generated files
-Library/
-Logs/
-Temp/
-Obj/
-Build/
-UserSettings/
-*.csproj
-*.sln
-*.unitypackage
-
-# Large zip
 ShanMainFiles.zip
-
-# Environment / secrets
 .env
-
-# OS files
-.DS_Store
-Thumbs.db
-
-# IDE
-.idea/
-.vscode/
