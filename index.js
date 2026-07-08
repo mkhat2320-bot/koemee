@@ -1715,13 +1715,22 @@ function GetAllDocumentMongoDB(data, lSocket) {
                         if (err) {
                         }
                         for (var i = 0; i < result.length; i++) {
+                                // Count live players in this room
+                                var roomId = result[i]._id.toString();
+                                var playerCount = 0;
+                                for (var k in socketInfo) {
+                                        if (socketInfo[k].room == roomId) {
+                                                playerCount += 1;
+                                        }
+                                }
                                 lSocket.emit("GetShan", {
                                         id: result[i]._id, points: result[i].points, firstprize: result[i].firstprize,
+                                        players: playerCount, commission: result[i].commission || 5,
+                                        lobbyName: result[i].lobbyName || "Shan Koe Mee",
                                         status: "yes"
                                 });
                                 empty = 1;
                         }
-                        //console.log(result);
                         db.close();
                         if (empty == 0) {
                                 lSocket.emit("GetShan", { status: "no" });
@@ -1774,5 +1783,4 @@ listOfUsers = function () {
 server.listen(app.get('port'), function () {
         console.log("Server is Running : " + server.address().port);
 });
-
 
