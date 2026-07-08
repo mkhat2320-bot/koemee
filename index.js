@@ -1109,12 +1109,14 @@ io.on('connection', function (socket) {
                 }
         });
 
-        socket.on("PlayerJoin", function (data) {
+                socket.on("PlayerJoin", function (data) {
+                console.log("=== PlayerJoin === room=" + data.room + " seat=" + data.seat + " user=" + data.username2 + " socketid=" + socket.id);
                 var ch2 = true;
                 var joinChe = false;
                 var initBankerChe = false;
                 var roomSocket = io.sockets.adapter.rooms[data.room];
                 var seatFullChe = true;
+                console.log("roomSocket exists: " + (roomSocket != undefined) + " roomSocket.length: " + (roomSocket ? roomSocket.length : "N/A"));
                 for (var k in socketInfo) {
                         var lSocket = socketInfo[k];
                         if (lSocket.room == data.room && lSocket.seat == parseInt(data.seat)) {
@@ -1126,7 +1128,6 @@ io.on('connection', function (socket) {
                         if (roomSocket == undefined) {
                                 socket.join(data.room);
                                 joinChe = true;
-                                //socket.emit("RoomConnected", { room: parseInt(data.room) });
                                 socket.adapter.rooms[data.room].dealerValue = (parseInt(data.seat) - 1);
                                 socket.adapter.rooms[data.room].play = 0;
                                 socket.adapter.rooms[data.room].searchOne = 0;
@@ -1146,10 +1147,10 @@ io.on('connection', function (socket) {
                                 if (roomSocket.length < 6) {
                                         socket.join(data.room);
                                         joinChe = true;
-                                        //socket.emit("RoomConnected", { room: parseInt(data.room) });
                                         ch2 = false;
                                 }
                         }
+                        console.log("joinChe: " + joinChe + " initBankerChe: " + initBankerChe);
                         if (joinChe) {
                                 var soRoom = socket.adapter.rooms[data.room];
                                 var len = 1;
@@ -1212,8 +1213,10 @@ io.on('connection', function (socket) {
 
                                         socketInfo[socId].seat = parseInt(data.seat);
                                 }
+                                console.log("Broadcasting PlayerJoin to all in room " + data.room);
                                 for (var k in socketInfo) {
                                         var lSocket = socketInfo[k];
+                                        console.log("  check: socketInfo room=" + lSocket.room + " data.room=" + data.room + " wait=" + lSocket.wait + " match=" + (lSocket.room == data.room));
                                         if (lSocket.room == data.room && lSocket.wait == 0) {
                                                 lSocket.socket.emit("PlayerJoin", {
                                                         seat: (lSocket.seat - 1),
@@ -1245,6 +1248,7 @@ io.on('connection', function (socket) {
                                 }
                                 if (PlayerCountFunction(socketInfo[socket.id]) >= 2 && socketInfo[socket.id].wait == 0)
                                         socket.adapter.rooms[data.room].play = 1;
+                                console.log("=== PlayerJoin DONE === total players in room: " + PlayerCountFunction(socketInfo[socket.id]));
                         }
                 }
         });
@@ -1715,8 +1719,7 @@ function GetAllDocumentMongoDB(data, lSocket) {
                         if (err) {
                         }
                         for (var i = 0; i < result.length; i++) {
-                                // Count live players in this room
-                                var roomId = result[i]._id.toString();
+                                var roomId = String(i + 1);
                                 var playerCount = 0;
                                 for (var k in socketInfo) {
                                         if (socketInfo[k].room == roomId) {
@@ -1724,11 +1727,15 @@ function GetAllDocumentMongoDB(data, lSocket) {
                                         }
                                 }
                                 lSocket.emit("GetShan", {
-                                        id: result[i]._id, points: result[i].points, firstprize: result[i].firstprize,
-                                        players: playerCount, commission: result[i].commission || 5,
-                                        lobbyName: result[i].lobbyName || "Shan Koe Mee",
+                                        id: (i + 1),
+                                        points: result[i].points,
+                                        firstprize: result[i].firstprize,
+                                        players: playerCount,
+                                        commission: result[i].commission || 5,
+                                        lobbyName: result[i].lobbyName || "Table " + (i + 1),
                                         status: "yes"
                                 });
+                                console.log("Room " + (i + 1) + " sent. Players: " + playerCount);
                                 empty = 1;
                         }
                         db.close();
@@ -1783,4 +1790,3 @@ listOfUsers = function () {
 server.listen(app.get('port'), function () {
         console.log("Server is Running : " + server.address().port);
 });
-
