@@ -1,46 +1,48 @@
 // ============================================
 // Shan Koe Mee Server - FIXED VERSION
 // Socket.IO v2 + MongoDB Atlas
+// Only uses: http, socket.io, mongodb (NO express, NO cors)
 // ============================================
 
-const http = require("http");
-const express = require("express");
-const { MongoClient, ObjectId } = require("mongodb");
-const cors = require("cors");
-const path = require("path");
+var http = require("http");
+var MongoClient = require("mongodb").MongoClient;
 
-const app = express();
-app.use(cors());
-app.use(express.json());
+var server = http.createServer(function (req, res) {
+  // Health check
+  if (req.url === "/health" || req.url === "/") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        name: "Shan Koe Mee Server",
+        status: "running",
+        time: new Date().toISOString(),
+      })
+    );
+  } else {
+    res.writeHead(404);
+    res.end("Not Found");
+  }
+});
 
-// Serve static files (for Netlify, this is optional but helpful for local testing)
-app.use(express.static(path.join(__dirname, "public")));
-
-const server = http.createServer(app);
-
-// ---- Socket.IO v2 ----
-const io = require("socket.io")(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"],
-  },
+// ---- Socket.IO v2 (NO cors option needed for raw http server) ----
+var io = require("socket.io")(server, {
   pingInterval: 10000,
   pingTimeout: 15000,
 });
 
-// ---- MongoDB Atlas Connection ----
-const uri =
+// ---- MongoDB Atlas ----
+var uri =
   "mongodb+srv://ludofirst:kargan82@ludo.gyzkr.mongodb.net/myFirstDatabase?retryWrites=true&w=majority";
-const dbName = "shan";
+var dbName = "shan";
 
 // Track live players per room
 // socketInfo[roomId] = { socketId: { name, mobile, chips, seatIndex, ... }, ... }
-let socketInfo = {};
+var socketInfo = {};
 // Track which socket is in which room
-let socketRoomMap = {};
+var socketRoomMap = {};
 
 // ---- Helper: Get MongoDB Connection ----
-function getMongoClient(callback) {
+function getMongo(callback) {
   MongoClient.connect(
     uri,
     {
@@ -55,8 +57,8 @@ function getMongoClient(callback) {
         if (callback) callback(err, null);
         return;
       }
-      const dbo = client.db(dbName);
-      if (callback) callback(null, { dbo, client });
+      var dbo = client.db(dbName);
+      if (callback) callback(null, { dbo: dbo, client: client });
     }
   );
 }
@@ -70,10 +72,9 @@ io.on("connection", function (socket) {
 
   socket.on("disconnect", function () {
     console.log("Socket disconnected: " + socket.id);
-    // Clean up socketInfo
-    const roomId = socketRoomMap[socket.id];
+    var roomId = socketRoomMap[socket.id];
     if (roomId && socketInfo[roomId]) {
-      const playerData = socketInfo[roomId][socket.id];
+      var playerData = socketInfo[roomId][socket.id];
       if (playerData) {
         console.log(
           "Player left room " +
@@ -83,7 +84,6 @@ io.on("connection", function (socket) {
             " name=" +
             (playerData.name || "?")
         );
-        // Notify other players
         socket.broadcast.to(roomId).emit("PlayerLeft", {
           socketId: socket.id,
           seatIndex: playerData.seatIndex || 0,
@@ -92,7 +92,6 @@ io.on("connection", function (socket) {
         });
       }
       delete socketInfo[roomId][socket.id];
-      // If room is empty, clean up
       if (Object.keys(socketInfo[roomId]).length === 0) {
         console.log("Room " + roomId + " is now empty, cleaning up");
         delete socketInfo[roomId];
@@ -102,11 +101,11 @@ io.on("connection", function (socket) {
   });
 
   // ============================================
-  // LOGIN / REGISTER
+  // LOGIN
   // ============================================
 
   socket.on("VerifyUser", function (data) {
-    console.log("VerifyUser received: mobile=" + (data.mobile || "undefined"));
+    console.log("VerifyUser: mobile=" + (data ? data.mobile : "undefined"));
 
     if (!data || !data.mobile || !data.password) {
       socket.emit("VerifiedUser", {
@@ -116,7 +115,7 @@ io.on("connection", function (socket) {
       return;
     }
 
-    getMongoClient(function (err, result) {
+    getMongo(function (err, result) {
       if (err) {
         socket.emit("VerifiedUser", {
           status: "error",
@@ -124,7 +123,8 @@ io.on("connection", function (socket) {
         });
         return;
       }
-      const { dbo, client } = result;
+      var dbo = result.dbo;
+      var client = result.client;
       dbo
         .collection("player")
         .find({ mobile: String(data.mobile), password: String(data.password) })
@@ -166,12 +166,16 @@ io.on("connection", function (socket) {
     });
   });
 
+  // ============================================
+  // REGISTER
+  // ============================================
+
   socket.on("RegisterUser", function (data) {
     console.log(
-      "RegisterUser received: mobile=" +
-        (data.mobile || "undefined") +
+      "RegisterUser: mobile=" +
+        (data ? data.mobile : "undefined") +
         " name=" +
-        (data.name || "undefined")
+        (data ? data.name : "undefined")
     );
 
     if (!data || !data.mobile || !data.password) {
@@ -182,7 +186,7 @@ io.on("connection", function (socket) {
       return;
     }
 
-    getMongoClient(function (err, result) {
+    getMongo(function (err, result) {
       if (err) {
         socket.emit("AlreadyRegisterd", {
           status: "error",
@@ -190,9 +194,9 @@ io.on("connection", function (socket) {
         });
         return;
       }
-      const { dbo, client } = result;
+      var dbo = result.dbo;
+      var client = result.client;
 
-      // Check if already registered
       dbo
         .collection("player")
         .find({ mobile: String(data.mobile) })
@@ -209,7 +213,9 @@ io.on("connection", function (socket) {
           }
 
           if (existing.length > 0) {
-            console.log("RegisterUser: mobile " + data.mobile + " already registered");
+            console.log(
+              "RegisterUser: mobile " + data.mobile + " already registered"
+            );
             socket.emit("AlreadyRegisterd", {
               status: "exists",
               message: "Mobile number already registered",
@@ -218,8 +224,7 @@ io.on("connection", function (socket) {
             return;
           }
 
-          // Register new user
-          const newUser = {
+          var newUser = {
             firstname: data.name || "",
             name: data.name || "",
             mobile: String(data.mobile),
@@ -253,12 +258,10 @@ io.on("connection", function (socket) {
 
   socket.on("RegisterUser2", function (data) {
     console.log(
-      "RegisterUser2 received: mobile=" +
-        (data.mobile || "undefined") +
+      "RegisterUser2: mobile=" +
+        (data ? data.mobile : "undefined") +
         " name=" +
-        (data.name || "undefined") +
-        " refer=" +
-        (data.referCode || "none")
+        (data ? data.name : "undefined")
     );
 
     if (!data || !data.mobile || !data.password) {
@@ -269,7 +272,7 @@ io.on("connection", function (socket) {
       return;
     }
 
-    getMongoClient(function (err, result) {
+    getMongo(function (err, result) {
       if (err) {
         socket.emit("AlreadyRegisterd2", {
           status: "error",
@@ -277,7 +280,8 @@ io.on("connection", function (socket) {
         });
         return;
       }
-      const { dbo, client } = result;
+      var dbo = result.dbo;
+      var client = result.client;
 
       dbo
         .collection("player")
@@ -305,7 +309,7 @@ io.on("connection", function (socket) {
             return;
           }
 
-          const newUser = {
+          var newUser = {
             firstname: data.name || "",
             name: data.name || "",
             mobile: String(data.mobile),
@@ -343,14 +347,14 @@ io.on("connection", function (socket) {
   // ============================================
 
   socket.on("GetChips", function (data) {
-    console.log("GetChips received: mobile=" + (data.mobile || "undefined"));
+    console.log("GetChips: mobile=" + (data ? data.mobile : "undefined"));
 
     if (!data || !data.mobile) {
       socket.emit("ChipsData", { status: "error", message: "Mobile required" });
       return;
     }
 
-    getMongoClient(function (err, result) {
+    getMongo(function (err, result) {
       if (err) {
         socket.emit("ChipsData", {
           status: "error",
@@ -358,7 +362,8 @@ io.on("connection", function (socket) {
         });
         return;
       }
-      const { dbo, client } = result;
+      var dbo = result.dbo;
+      var client = result.client;
       dbo
         .collection("player")
         .find({ mobile: String(data.mobile) })
@@ -367,44 +372,48 @@ io.on("connection", function (socket) {
           client.close();
           if (err) {
             console.log("GetChips query error: " + err);
-            socket.emit("ChipsData", { status: "error", message: "Database error" });
+            socket.emit("ChipsData", {
+              status: "error",
+              message: "Database error",
+            });
             return;
           }
           if (result.length === 0) {
             console.log("GetChips: no user found for mobile=" + data.mobile);
-            socket.emit("ChipsData", { status: "error", message: "User not found" });
+            socket.emit("ChipsData", {
+              status: "error",
+              message: "User not found",
+            });
             return;
           }
-          const chips = result[0].chips || 0;
+          var chips = result[0].chips || 0;
           console.log(
             "GetChips SUCCESS: mobile=" + data.mobile + " chips=" + chips
           );
-          socket.emit("ChipsData", {
-            status: "success",
-            chips: chips,
-          });
+          socket.emit("ChipsData", { status: "success", chips: chips });
         });
     });
   });
 
   // ============================================
   // GET ALL ROOMS (GetAllDocumentMongoDB)
+  // THE FUNCTION THAT WAS CRASHING - NOW FIXED
   // ============================================
 
   socket.on("GetAllDocumentMongoDB", function (data) {
     console.log("GetAllDocumentMongoDB: fetching all rooms...");
 
-    getMongoClient(function (err, result) {
+    getMongo(function (err, result) {
       if (err) {
         console.log(
           "GetAllDocumentMongoDB: MongoDB connection FAILED - " + err.message
         );
-        // Send empty array so client doesn't crash waiting
-        socket.emit("AllDocumentMongoDB", { rooms: [] });
+        socket.emit("AllDocumentMongoDB", []);
         return;
       }
 
-      const { dbo, client } = result;
+      var dbo = result.dbo;
+      var client = result.client;
 
       dbo
         .collection("gameSettings")
@@ -413,7 +422,7 @@ io.on("connection", function (socket) {
           client.close();
           if (err) {
             console.log("GetAllDocumentMongoDB query error: " + err);
-            socket.emit("AllDocumentMongoDB", { rooms: [] });
+            socket.emit("AllDocumentMongoDB", []);
             return;
           }
 
@@ -421,33 +430,35 @@ io.on("connection", function (socket) {
             "GetAllDocumentMongoDB: found " + result.length + " rooms"
           );
 
-          // Build response with sequential IDs (1,2,3...) instead of MongoDB ObjectIds
-          let rooms = [];
-          for (let i = 0; i < result.length; i++) {
-            const r = result[i];
+          // Build array with sequential IDs (1,2,3...) instead of MongoDB ObjectIds
+          var rooms = [];
+          for (var i = 0; i < result.length; i++) {
+            var r = result[i];
+            var roomId = String(r._id || i + 1);
+
             // Count online players in this room from socketInfo
-            const roomId = String(r._id || (i + 1));
-            let playerCount = 0;
+            var playerCount = 0;
             if (socketInfo[roomId]) {
               playerCount = Object.keys(socketInfo[roomId]).length;
             }
 
             rooms.push({
               id: i + 1, // Sequential integer ID, NOT MongoDB ObjectId
-              roomName: r.roomName || ("Room " + (i + 1)),
+              roomName: r.roomName || "Room " + (i + 1),
               betAmount: r.betAmount || 100,
               maxPlayers: r.maxPlayers || 6,
               playerCount: playerCount,
               banker: r.banker || 0,
-              // Include original _id for internal room matching
-              _roomId: String(r._id),
+              _roomId: roomId,
             });
           }
 
           console.log(
             "GetAllDocumentMongoDB: sending " + rooms.length + " rooms"
           );
-          socket.emit("AllDocumentMongoDB", { rooms: rooms });
+
+          // Emit as array directly (matching original server format)
+          socket.emit("AllDocumentMongoDB", rooms);
         });
     });
   });
@@ -458,14 +469,14 @@ io.on("connection", function (socket) {
 
   socket.on("PlayerJoin", function (data) {
     console.log(
-      "PlayerJoin received: socketId=" +
+      "PlayerJoin: socket=" +
         socket.id +
         " roomId=" +
-        (data.roomId || "undefined") +
+        (data ? data.roomId : "undefined") +
         " name=" +
-        (data.name || "undefined") +
+        (data ? data.name : "undefined") +
         " mobile=" +
-        (data.mobile || "undefined")
+        (data ? data.mobile : "undefined")
     );
 
     if (!data || !data.roomId) {
@@ -474,7 +485,7 @@ io.on("connection", function (socket) {
       return;
     }
 
-    const roomId = String(data.roomId);
+    var roomId = String(data.roomId);
 
     // Initialize room in socketInfo if not exists
     if (!socketInfo[roomId]) {
@@ -490,15 +501,15 @@ io.on("connection", function (socket) {
     }
 
     // Find first available seat (1-6)
-    let takenSeats = {};
-    for (let sid in socketInfo[roomId]) {
+    var takenSeats = {};
+    for (var sid in socketInfo[roomId]) {
       if (socketInfo[roomId][sid].seatIndex) {
         takenSeats[socketInfo[roomId][sid].seatIndex] = true;
       }
     }
 
-    let assignedSeat = 0;
-    for (let s = 1; s <= 6; s++) {
+    var assignedSeat = 0;
+    for (var s = 1; s <= 6; s++) {
       if (!takenSeats[s]) {
         assignedSeat = s;
         break;
@@ -526,17 +537,17 @@ io.on("connection", function (socket) {
     // Join Socket.IO room
     socket.join(roomId);
 
-    const playerCount = Object.keys(socketInfo[roomId]).length;
+    var playerCount = Object.keys(socketInfo[roomId]).length;
     console.log(
       "PlayerJoin SUCCESS: " +
         (data.name || "Player") +
-        " seated at seat " +
+        " seat=" +
         assignedSeat +
-        " in room " +
+        " room=" +
         roomId +
         " (" +
         playerCount +
-        "/6 players)"
+        "/6)"
     );
 
     // Send confirmation to joining player
@@ -547,18 +558,19 @@ io.on("connection", function (socket) {
       playerCount: playerCount,
     });
 
-    // Notify ALL players in the room (including the joiner) about updated player list
-    let playerList = [];
-    for (let sid in socketInfo[roomId]) {
+    // Build player list for the room
+    var playerList = [];
+    for (var sid2 in socketInfo[roomId]) {
       playerList.push({
-        socketId: sid,
-        name: socketInfo[roomId][sid].name,
-        mobile: socketInfo[roomId][sid].mobile,
-        chips: socketInfo[roomId][sid].chips,
-        seatIndex: socketInfo[roomId][sid].seatIndex,
+        socketId: sid2,
+        name: socketInfo[roomId][sid2].name,
+        mobile: socketInfo[roomId][sid2].mobile,
+        chips: socketInfo[roomId][sid2].chips,
+        seatIndex: socketInfo[roomId][sid2].seatIndex,
       });
     }
 
+    // Notify ALL players in room about updated list
     io.to(roomId).emit("PlayerList", {
       roomId: roomId,
       players: playerList,
@@ -577,15 +589,15 @@ io.on("connection", function (socket) {
   });
 
   // ============================================
-  // UPDATE CASH (Updated_Cash)
+  // UPDATE CASH
   // ============================================
 
   socket.on("Updated_Cash", function (data) {
     console.log(
-      "Updated_Cash received: mobile=" +
-        (data.mobile || "undefined") +
+      "Updated_Cash: mobile=" +
+        (data ? data.mobile : "undefined") +
         " chips=" +
-        (data.chips || "undefined")
+        (data ? data.chips : "undefined")
     );
 
     if (!data || !data.mobile) {
@@ -593,14 +605,15 @@ io.on("connection", function (socket) {
       return;
     }
 
-    const newChips = Number(data.chips) || 0;
+    var newChips = Number(data.chips) || 0;
 
-    getMongoClient(function (err, result) {
+    getMongo(function (err, result) {
       if (err) {
-        console.log("Updated_Cash: MongoDB connection error - " + err.message);
+        console.log("Updated_Cash: MongoDB error - " + err.message);
         return;
       }
-      const { dbo, client } = result;
+      var dbo = result.dbo;
+      var client = result.client;
       dbo
         .collection("player")
         .updateOne(
@@ -624,15 +637,15 @@ io.on("connection", function (socket) {
   });
 
   // ============================================
-  // WITHDRAW (WithdrawMongoDB)
+  // WITHDRAW
   // ============================================
 
   socket.on("WithdrawMongoDB", function (data) {
     console.log(
-      "WithdrawMongoDB received: mobile=" +
-        (data.mobile || "undefined") +
+      "WithdrawMongoDB: mobile=" +
+        (data ? data.mobile : "undefined") +
         " amount=" +
-        (data.amount || "undefined")
+        (data ? data.amount : "undefined")
     );
 
     if (!data || !data.mobile) {
@@ -643,9 +656,9 @@ io.on("connection", function (socket) {
       return;
     }
 
-    const withdrawAmount = Number(data.amount) || 0;
+    var withdrawAmount = Number(data.amount) || 0;
 
-    getMongoClient(function (err, result) {
+    getMongo(function (err, result) {
       if (err) {
         socket.emit("WithdrawResult", {
           status: "error",
@@ -653,9 +666,9 @@ io.on("connection", function (socket) {
         });
         return;
       }
-      const { dbo, client } = result;
+      var dbo = result.dbo;
+      var client = result.client;
 
-      // Check current chips
       dbo
         .collection("player")
         .find({ mobile: String(data.mobile) })
@@ -670,11 +683,11 @@ io.on("connection", function (socket) {
             return;
           }
 
-          const currentChips = Number(result[0].chips) || 0;
+          var currentChips = Number(result[0].chips) || 0;
           if (currentChips < withdrawAmount) {
             client.close();
             console.log(
-              "WithdrawMongoDB: insufficient chips. Has=" +
+              "WithdrawMongoDB: insufficient. Has=" +
                 currentChips +
                 " Wants=" +
                 withdrawAmount
@@ -686,7 +699,7 @@ io.on("connection", function (socket) {
             return;
           }
 
-          const newChips = currentChips - withdrawAmount;
+          var newChips = currentChips - withdrawAmount;
           dbo
             .collection("player")
             .updateOne(
@@ -728,19 +741,15 @@ io.on("connection", function (socket) {
   socket.on("GetAnnouncement", function (data) {
     console.log("GetAnnouncement received");
 
-    getMongoClient(function (err, result) {
+    getMongo(function (err, result) {
       if (err) {
-        console.log(
-          "GetAnnouncement: MongoDB connection error - " + err.message
-        );
-        socket.emit("Announcement", {
-          message: "Welcome to Shan Koe Mee!",
-        });
+        console.log("GetAnnouncement: MongoDB error - " + err.message);
+        socket.emit("Announcement", { message: "Welcome to Shan Koe Mee!" });
         return;
       }
-      const { dbo, client } = result;
+      var dbo = result.dbo;
+      var client = result.client;
 
-      // Try to get announcement from settings or return default
       dbo
         .collection("gameSettings")
         .find({ type: "announcement" })
@@ -748,9 +757,7 @@ io.on("connection", function (socket) {
         .toArray(function (err, result) {
           client.close();
           if (err || result.length === 0) {
-            socket.emit("Announcement", {
-              message: "Welcome to Shan Koe Mee!",
-            });
+            socket.emit("Announcement", { message: "Welcome to Shan Koe Mee!" });
             return;
           }
           socket.emit("Announcement", {
@@ -765,9 +772,9 @@ io.on("connection", function (socket) {
   // ============================================
 
   socket.on("checkConnection", function (data) {
-    console.log("checkConnection received from socket " + socket.id);
+    console.log("checkConnection from socket " + socket.id);
 
-    getMongoClient(function (err, result) {
+    getMongo(function (err, result) {
       if (err) {
         console.log("checkConnection: MongoDB error - " + err.message);
         socket.emit("connectionStatus", {
@@ -776,8 +783,7 @@ io.on("connection", function (socket) {
         });
         return;
       }
-      const { client } = result;
-      client.close();
+      result.client.close();
       console.log("checkConnection: MongoDB OK");
       socket.emit("connectionStatus", {
         status: "ok",
@@ -787,19 +793,17 @@ io.on("connection", function (socket) {
   });
 
   // ============================================
-  // GAME ACTIONS (betting, card play, etc.)
+  // GAME ACTIONS
   // ============================================
 
   socket.on("PlayerBet", function (data) {
     console.log(
       "PlayerBet: seat=" +
-        (data.seatIndex || "?") +
+        (data ? data.seatIndex : "?") +
         " amount=" +
-        (data.amount || "?") +
-        " in room=" +
-        (socketRoomMap[socket.id] || "none")
+        (data ? data.amount : "?")
     );
-    const roomId = socketRoomMap[socket.id];
+    var roomId = socketRoomMap[socket.id];
     if (roomId) {
       socket.broadcast.to(roomId).emit("PlayerBetUpdate", {
         socketId: socket.id,
@@ -812,11 +816,11 @@ io.on("connection", function (socket) {
   socket.on("PlayerAction", function (data) {
     console.log(
       "PlayerAction: seat=" +
-        (data.seatIndex || "?") +
+        (data ? data.seatIndex : "?") +
         " action=" +
-        (data.action || "?")
+        (data ? data.action : "?")
     );
-    const roomId = socketRoomMap[socket.id];
+    var roomId = socketRoomMap[socket.id];
     if (roomId) {
       socket.broadcast.to(roomId).emit("PlayerActionUpdate", {
         socketId: socket.id,
@@ -828,38 +832,32 @@ io.on("connection", function (socket) {
   });
 
   socket.on("SendMessage", function (data) {
-    console.log(
-      "SendMessage: from=" +
-        (data.name || "?") +
-        " msg=" +
-        (data.message || "").substring(0, 50)
-    );
-    const roomId = socketRoomMap[socket.id];
+    var roomId = socketRoomMap[socket.id];
     if (roomId) {
       io.to(roomId).emit("NewMessage", {
         socketId: socket.id,
-        name: data.name || "Player",
-        message: data.message || "",
+        name: data ? data.name : "Player",
+        message: data ? data.message : "",
         time: new Date().toISOString(),
       });
     }
   });
 
-  // ============================================
-  // ROOM INFO (get players in a specific room)
-  // ============================================
-
   socket.on("GetRoomPlayers", function (data) {
-    const roomId = String(data.roomId || "");
+    var roomId = String(data ? data.roomId : "");
     console.log("GetRoomPlayers: roomId=" + roomId);
 
     if (!socketInfo[roomId]) {
-      socket.emit("RoomPlayers", { roomId: roomId, players: [], playerCount: 0 });
+      socket.emit("RoomPlayers", {
+        roomId: roomId,
+        players: [],
+        playerCount: 0,
+      });
       return;
     }
 
-    let playerList = [];
-    for (let sid in socketInfo[roomId]) {
+    var playerList = [];
+    for (var sid in socketInfo[roomId]) {
       playerList.push({
         socketId: sid,
         name: socketInfo[roomId][sid].name,
@@ -878,27 +876,10 @@ io.on("connection", function (socket) {
 });
 
 // ============================================
-// EXPRESS ROUTES (for health checks, etc.)
-// ============================================
-
-app.get("/health", function (req, res) {
-  res.json({ status: "ok", time: new Date().toISOString() });
-});
-
-app.get("/", function (req, res) {
-  res.json({
-    name: "Shan Koe Mee Server",
-    status: "running",
-    connectedClients: Object.keys(io.sockets.sockets).length,
-    rooms: Object.keys(socketInfo).length,
-  });
-});
-
-// ============================================
 // START SERVER
 // ============================================
 
-const PORT = process.env.PORT || 3000;
+var PORT = process.env.PORT || 3000;
 server.listen(PORT, function () {
   console.log("========================================");
   console.log("Shan Koe Mee Server Started!");
