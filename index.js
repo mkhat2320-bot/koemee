@@ -1094,10 +1094,7 @@ function PlayerCountFunction(lSocket) {
 io.on("connection", function (socket) {
   console.log("server connected - socket: " + socket.id);
 
-  // IMMEDIATELY send rooms to client (don't wait for client to ask)
-  sendRoomsToSocket(socket);
-
-  // Also emit Server_Started like original
+  // Emit Server_Started - rooms will be sent when client emits "GetShan"
   socket.emit("Server_Started", {});
 
   socket.on("EnterRoom", function (data) {
@@ -1155,13 +1152,42 @@ io.on("connection", function (socket) {
     var roomSocket = io.sockets.adapter.rooms[data.room];
     var seatFullChe = true;
     console.log("roomSocket exists: " + (roomSocket != undefined) + " roomSocket.length: " + (roomSocket ? roomSocket.length : "N/A"));
+
+    // Check if requested seat is taken
+    var requestedSeatTaken = false;
     for (var k in socketInfo) {
       var lSocket = socketInfo[k];
       if (lSocket.room == data.room && lSocket.seat == parseInt(data.seat)) {
+        requestedSeatTaken = true;
+      }
+    }
+
+    // If seat is taken, auto-find next empty seat
+    if (requestedSeatTaken) {
+      var foundSeat = 0;
+      for (var trySeat = 1; trySeat <= 6; trySeat++) {
+        var seatTaken = false;
+        for (var k in socketInfo) {
+          var lSocket = socketInfo[k];
+          if (lSocket.room == data.room && lSocket.seat == trySeat) {
+            seatTaken = true;
+          }
+        }
+        if (!seatTaken) {
+          foundSeat = trySeat;
+          break;
+        }
+      }
+      if (foundSeat > 0) {
+        console.log("Seat " + data.seat + " taken, auto-assigned seat " + foundSeat);
+        data.seat = String(foundSeat);
+      } else {
+        // All 6 seats full
         seatFullChe = false;
         socket.emit("SeatFull", {});
       }
     }
+
     if (seatFullChe) {
       if (roomSocket == undefined) {
         socket.join(data.room);
