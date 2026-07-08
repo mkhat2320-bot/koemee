@@ -1,99 +1,199 @@
 // ============================================
-// Shan Koe Mee Server - FIXED VERSION
+// Shan Koe Mee Server - FIXED v3
 // Socket.IO v2 + MongoDB Atlas
-// Only uses: http, socket.io, mongodb (NO express, NO cors)
+// Only uses: http, socket.io, mongodb
 // ============================================
 
 var http = require("http");
 var MongoClient = require("mongodb").MongoClient;
 
 var server = http.createServer(function (req, res) {
-  // Health check
   if (req.url === "/health" || req.url === "/") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(
-      JSON.stringify({
-        name: "Shan Koe Mee Server",
-        status: "running",
-        time: new Date().toISOString(),
-      })
-    );
+    res.end(JSON.stringify({
+      name: "Shan Koe Mee Server",
+      status: "running",
+      mongo: mongoOK ? "connected" : "DISCONNECTED",
+      time: new Date().toISOString()
+    }));
   } else {
     res.writeHead(404);
     res.end("Not Found");
   }
 });
 
-// ---- Socket.IO v2 (NO cors option needed for raw http server) ----
 var io = require("socket.io")(server, {
   pingInterval: 10000,
-  pingTimeout: 15000,
+  pingTimeout: 15000
 });
 
 // ---- MongoDB Atlas ----
-var uri =
-  "mongodb+srv://ludofirst:kargan82@ludo.gyzkr.mongodb.net/myFirstDatabase?retryWrites=true&w=majority";
+var uri = "mongodb+srv://ludofirst:kargan82@ludo.gyzkr.mongodb.net/myFirstDatabase?retryWrites=true&w=majority";
 var dbName = "shan";
+var mongoOK = false;
 
 // Track live players per room
-// socketInfo[roomId] = { socketId: { name, mobile, chips, seatIndex, ... }, ... }
 var socketInfo = {};
-// Track which socket is in which room
 var socketRoomMap = {};
+
+// Fallback rooms if MongoDB is down
+var fallbackRooms = [
+  { id: 1, roomName: "Room 1", betAmount: 100, maxPlayers: 6, playerCount: 0, banker: 0 },
+  { id: 2, roomName: "Room 2", betAmount: 500, maxPlayers: 6, playerCount: 0, banker: 0 },
+  { id: 3, roomName: "Room 3", betAmount: 1000, maxPlayers: 6, playerCount: 0, banker: 0 },
+  { id: 4, roomName: "Room 4", betAmount: 5000, maxPlayers: 6, playerCount: 0, banker: 0 }
+];
+
+// Cached rooms from MongoDB (refreshed periodically)
+var cachedRooms = null;
 
 // ---- Helper: Get MongoDB Connection ----
 function getMongo(callback) {
-  MongoClient.connect(
-    uri,
-    {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-      serverSelectionTimeoutMS: 10000,
-      connectTimeoutMS: 15000,
-    },
-    function (err, client) {
+  MongoClient.connect(uri, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+    serverSelectionTimeoutMS: 10000,
+    connectTimeoutMS: 15000
+  }, function(err, client) {
+    if (err) {
+      console.log("MongoDB error: " + err.message);
+      mongoOK = false;
+      if (callback) callback(err, null);
+      return;
+    }
+    mongoOK = true;
+    var dbo = client.db(dbName);
+    if (callback) callback(null, { dbo: dbo, client: client });
+  });
+}
+
+// ---- Startup: Test MongoDB connection ----
+function testMongoConnection() {
+  console.log("========================================");
+  console.log("Testing MongoDB Atlas connection...");
+  getMongo(function(err, result) {
+    if (err) {
+      console.log("!!! MONGODB CONNECTION FAILED !!!");
+      console.log("Error: " + err.message);
+      console.log("Server will run with FALLBACK room data.");
+      console.log("FIX: Go to MongoDB Atlas > Network Access > Add 0.0.0.0/0");
+      console.log("========================================");
+      return;
+    }
+    console.log("MONGODB CONNECTION SUCCESS!");
+    result.client.close();
+    console.log("========================================");
+  });
+}
+
+// ---- Refresh room cache from MongoDB ----
+function refreshRoomCache() {
+  getMongo(function(err, result) {
+    if (err) {
+      console.log("refreshRoomCache: MongoDB error, using fallback");
+      cachedRooms = null;
+      return;
+    }
+    var dbo = result.dbo;
+    var client = result.client;
+    dbo.collection("gameSettings").find({}).toArray(function(err, rooms) {
+      client.close();
       if (err) {
-        console.log("MongoDB connection error: " + err.message);
-        if (callback) callback(err, null);
+        console.log("refreshRoomCache: query error");
+        cachedRooms = null;
         return;
       }
-      var dbo = client.db(dbName);
-      if (callback) callback(null, { dbo: dbo, client: client });
-    }
-  );
+      // Build room list with sequential IDs
+      var list = [];
+      for (var i = 0; i < rooms.length; i++) {
+        var r = rooms[i];
+        var roomId = String(r._id || (i + 1));
+        var pc = 0;
+        if (socketInfo[roomId]) {
+          pc = Object.keys(socketInfo[roomId]).length;
+        }
+        list.push({
+          id: i + 1,
+          _id: String(r._id),
+          roomName: r.roomName || ("Room " + (i + 1)),
+          betAmount: r.betAmount || 100,
+          maxPlayers: r.maxPlayers || 6,
+          playerCount: pc,
+          banker: r.banker || 0
+        });
+      }
+      cachedRooms = list;
+      console.log("Room cache refreshed: " + list.length + " rooms");
+    });
+  });
 }
 
 // ============================================
 // SOCKETS
 // ============================================
 
-io.on("connection", function (socket) {
-  console.log("New socket connected: " + socket.id);
+function getRoomList() {
+  // If we have cached rooms from MongoDB, use those with live player counts
+  if (cachedRooms && cachedRooms.length > 0) {
+    var rooms = [];
+    for (var i = 0; i < cachedRooms.length; i++) {
+      var r = cachedRooms[i];
+      var roomId = String(r._id || r.id);
+      var pc = 0;
+      if (socketInfo[roomId]) {
+        pc = Object.keys(socketInfo[roomId]).length;
+      }
+      rooms.push({
+        id: r.id,
+        _id: r._id,
+        roomName: r.roomName,
+        betAmount: r.betAmount,
+        maxPlayers: r.maxPlayers,
+        playerCount: pc,
+        banker: r.banker
+      });
+    }
+    return rooms;
+  }
+  // Fallback rooms
+  return fallbackRooms.slice();
+}
 
-  socket.on("disconnect", function () {
+function sendRoomsToSocket(socket) {
+  var rooms = getRoomList();
+  console.log("Sending " + rooms.length + " rooms to socket " + socket.id);
+  socket.emit("AllDocumentMongoDB", rooms);
+}
+
+io.on("connection", function(socket) {
+  console.log("Socket connected: " + socket.id);
+
+  // CRITICAL: Send room data IMMEDIATELY on connect
+  // Unity client expects this push on connection
+  sendRoomsToSocket(socket);
+
+  // Also send connection status
+  socket.emit("connectionStatus", {
+    status: mongoOK ? "ok" : "error",
+    message: mongoOK ? "Connected" : "MongoDB not connected"
+  });
+
+  socket.on("disconnect", function() {
     console.log("Socket disconnected: " + socket.id);
     var roomId = socketRoomMap[socket.id];
     if (roomId && socketInfo[roomId]) {
-      var playerData = socketInfo[roomId][socket.id];
-      if (playerData) {
-        console.log(
-          "Player left room " +
-            roomId +
-            " seat " +
-            (playerData.seatIndex || "?") +
-            " name=" +
-            (playerData.name || "?")
-        );
+      var pd = socketInfo[roomId][socket.id];
+      if (pd) {
+        console.log("Player left room " + roomId + " seat " + (pd.seatIndex || "?") + " name=" + (pd.name || "?"));
         socket.broadcast.to(roomId).emit("PlayerLeft", {
           socketId: socket.id,
-          seatIndex: playerData.seatIndex || 0,
-          name: playerData.name || "",
-          mobile: playerData.mobile || "",
+          seatIndex: pd.seatIndex || 0,
+          name: pd.name || "",
+          mobile: pd.mobile || ""
         });
       }
       delete socketInfo[roomId][socket.id];
       if (Object.keys(socketInfo[roomId]).length === 0) {
-        console.log("Room " + roomId + " is now empty, cleaning up");
         delete socketInfo[roomId];
       }
     }
@@ -104,65 +204,46 @@ io.on("connection", function (socket) {
   // LOGIN
   // ============================================
 
-  socket.on("VerifyUser", function (data) {
+  socket.on("VerifyUser", function(data) {
     console.log("VerifyUser: mobile=" + (data ? data.mobile : "undefined"));
 
     if (!data || !data.mobile || !data.password) {
-      socket.emit("VerifiedUser", {
-        status: "error",
-        message: "Mobile and password required",
-      });
+      socket.emit("VerifiedUser", { status: "error", message: "Missing data" });
       return;
     }
 
-    getMongo(function (err, result) {
+    getMongo(function(err, result) {
       if (err) {
-        socket.emit("VerifiedUser", {
-          status: "error",
-          message: "Database connection failed",
-        });
+        console.log("VerifyUser: DB error");
+        socket.emit("VerifiedUser", { status: "error", message: "DB error" });
         return;
       }
       var dbo = result.dbo;
       var client = result.client;
-      dbo
-        .collection("player")
-        .find({ mobile: String(data.mobile), password: String(data.password) })
-        .limit(1)
-        .toArray(function (err, result) {
-          client.close();
-          if (err) {
-            console.log("VerifyUser query error: " + err);
-            socket.emit("VerifiedUser", {
-              status: "error",
-              message: "Database error",
-            });
-            return;
-          }
-          if (result.length === 0) {
-            console.log("VerifyUser: no user found for mobile=" + data.mobile);
-            socket.emit("VerifiedUser", {
-              status: "error",
-              message: "Invalid mobile or password",
-            });
-            return;
-          }
-          console.log(
-            "VerifyUser SUCCESS: mobile=" +
-              data.mobile +
-              " name=" +
-              (result[0].firstname || result[0].name || "unknown") +
-              " chips=" +
-              (result[0].chips || 0)
-          );
-          socket.emit("VerifiedUser", {
-            status: "success",
-            name: result[0].firstname || result[0].name || "",
-            mobile: result[0].mobile || data.mobile,
-            chips: result[0].chips || 0,
-            id: result[0]._id || result[0].id || 0,
-          });
+      dbo.collection("player").find({
+        mobile: String(data.mobile),
+        password: String(data.password)
+      }).limit(1).toArray(function(err, result) {
+        client.close();
+        if (err) {
+          console.log("VerifyUser query error: " + err);
+          socket.emit("VerifiedUser", { status: "error", message: "DB error" });
+          return;
+        }
+        if (result.length === 0) {
+          console.log("VerifyUser: no user found for mobile=" + data.mobile);
+          socket.emit("VerifiedUser", { status: "error", message: "Invalid login" });
+          return;
+        }
+        console.log("VerifyUser SUCCESS: mobile=" + data.mobile + " name=" + (result[0].firstname || result[0].name || "?") + " chips=" + (result[0].chips || 0));
+        socket.emit("VerifiedUser", {
+          status: "success",
+          name: result[0].firstname || result[0].name || "",
+          mobile: result[0].mobile || data.mobile,
+          chips: result[0].chips || 0,
+          id: result[0]._id || result[0].id || 0
         });
+      });
     });
   });
 
@@ -170,175 +251,120 @@ io.on("connection", function (socket) {
   // REGISTER
   // ============================================
 
-  socket.on("RegisterUser", function (data) {
-    console.log(
-      "RegisterUser: mobile=" +
-        (data ? data.mobile : "undefined") +
-        " name=" +
-        (data ? data.name : "undefined")
-    );
+  socket.on("RegisterUser", function(data) {
+    console.log("RegisterUser: mobile=" + (data ? data.mobile : "undefined"));
 
     if (!data || !data.mobile || !data.password) {
-      socket.emit("AlreadyRegisterd", {
-        status: "error",
-        message: "Mobile and password required",
-      });
+      socket.emit("AlreadyRegisterd", { status: "error", message: "Missing data" });
       return;
     }
 
-    getMongo(function (err, result) {
+    getMongo(function(err, result) {
       if (err) {
-        socket.emit("AlreadyRegisterd", {
-          status: "error",
-          message: "Database connection failed",
-        });
+        socket.emit("AlreadyRegisterd", { status: "error", message: "DB error" });
         return;
       }
       var dbo = result.dbo;
       var client = result.client;
 
-      dbo
-        .collection("player")
-        .find({ mobile: String(data.mobile) })
-        .limit(1)
-        .toArray(function (err, existing) {
+      dbo.collection("player").find({ mobile: String(data.mobile) }).limit(1).toArray(function(err, existing) {
+        if (err) {
+          socket.emit("AlreadyRegisterd", { status: "error", message: "DB error" });
+          client.close();
+          return;
+        }
+        if (existing.length > 0) {
+          console.log("RegisterUser: already exists mobile=" + data.mobile);
+          socket.emit("AlreadyRegisterd", { status: "exists", message: "Already registered" });
+          client.close();
+          return;
+        }
+
+        var newUser = {
+          firstname: data.name || "",
+          name: data.name || "",
+          mobile: String(data.mobile),
+          password: String(data.password),
+          chips: 1000,
+          created: new Date().toISOString()
+        };
+
+        dbo.collection("player").insertOne(newUser, function(err, res) {
+          client.close();
           if (err) {
-            console.log("RegisterUser check error: " + err);
-            socket.emit("AlreadyRegisterd", {
-              status: "error",
-              message: "Database error",
-            });
-            client.close();
+            console.log("RegisterUser insert error: " + err);
+            socket.emit("AlreadyRegisterd", { status: "error", message: "Failed" });
             return;
           }
-
-          if (existing.length > 0) {
-            console.log(
-              "RegisterUser: mobile " + data.mobile + " already registered"
-            );
-            socket.emit("AlreadyRegisterd", {
-              status: "exists",
-              message: "Mobile number already registered",
-            });
-            client.close();
-            return;
-          }
-
-          var newUser = {
-            firstname: data.name || "",
-            name: data.name || "",
-            mobile: String(data.mobile),
-            password: String(data.password),
-            chips: 1000,
-            created: new Date().toISOString(),
-          };
-
-          dbo.collection("player").insertOne(newUser, function (err, res) {
-            client.close();
-            if (err) {
-              console.log("RegisterUser insert error: " + err);
-              socket.emit("AlreadyRegisterd", {
-                status: "error",
-                message: "Registration failed",
-              });
-              return;
-            }
-            console.log("RegisterUser SUCCESS: mobile=" + data.mobile);
-            socket.emit("AlreadyRegisterd", {
-              status: "success",
-              message: "Registration successful",
-              name: newUser.name,
-              mobile: newUser.mobile,
-              chips: newUser.chips,
-            });
+          console.log("RegisterUser SUCCESS: mobile=" + data.mobile);
+          socket.emit("AlreadyRegisterd", {
+            status: "success",
+            message: "Registered",
+            name: newUser.name,
+            mobile: newUser.mobile,
+            chips: newUser.chips
           });
         });
+      });
     });
   });
 
-  socket.on("RegisterUser2", function (data) {
-    console.log(
-      "RegisterUser2: mobile=" +
-        (data ? data.mobile : "undefined") +
-        " name=" +
-        (data ? data.name : "undefined")
-    );
+  socket.on("RegisterUser2", function(data) {
+    console.log("RegisterUser2: mobile=" + (data ? data.mobile : "undefined"));
 
     if (!data || !data.mobile || !data.password) {
-      socket.emit("AlreadyRegisterd2", {
-        status: "error",
-        message: "Mobile and password required",
-      });
+      socket.emit("AlreadyRegisterd2", { status: "error", message: "Missing data" });
       return;
     }
 
-    getMongo(function (err, result) {
+    getMongo(function(err, result) {
       if (err) {
-        socket.emit("AlreadyRegisterd2", {
-          status: "error",
-          message: "Database connection failed",
-        });
+        socket.emit("AlreadyRegisterd2", { status: "error", message: "DB error" });
         return;
       }
       var dbo = result.dbo;
       var client = result.client;
 
-      dbo
-        .collection("player")
-        .find({ mobile: String(data.mobile) })
-        .limit(1)
-        .toArray(function (err, existing) {
+      dbo.collection("player").find({ mobile: String(data.mobile) }).limit(1).toArray(function(err, existing) {
+        if (err) {
+          client.close();
+          socket.emit("AlreadyRegisterd2", { status: "error", message: "DB error" });
+          return;
+        }
+        if (existing.length > 0) {
+          console.log("RegisterUser2: already exists mobile=" + data.mobile);
+          socket.emit("AlreadyRegisterd2", { status: "exists", message: "Already registered" });
+          client.close();
+          return;
+        }
+
+        var newUser = {
+          firstname: data.name || "",
+          name: data.name || "",
+          mobile: String(data.mobile),
+          password: String(data.password),
+          referCode: data.referCode || "",
+          chips: 1000,
+          created: new Date().toISOString()
+        };
+
+        dbo.collection("player").insertOne(newUser, function(err, res) {
+          client.close();
           if (err) {
-            client.close();
-            socket.emit("AlreadyRegisterd2", {
-              status: "error",
-              message: "Database error",
-            });
+            console.log("RegisterUser2 insert error: " + err);
+            socket.emit("AlreadyRegisterd2", { status: "error", message: "Failed" });
             return;
           }
-
-          if (existing.length > 0) {
-            console.log(
-              "RegisterUser2: mobile " + data.mobile + " already registered"
-            );
-            socket.emit("AlreadyRegisterd2", {
-              status: "exists",
-              message: "Already registered",
-            });
-            client.close();
-            return;
-          }
-
-          var newUser = {
-            firstname: data.name || "",
-            name: data.name || "",
-            mobile: String(data.mobile),
-            password: String(data.password),
-            referCode: data.referCode || "",
-            chips: 1000,
-            created: new Date().toISOString(),
-          };
-
-          dbo.collection("player").insertOne(newUser, function (err, res) {
-            client.close();
-            if (err) {
-              console.log("RegisterUser2 insert error: " + err);
-              socket.emit("AlreadyRegisterd2", {
-                status: "error",
-                message: "Registration failed",
-              });
-              return;
-            }
-            console.log("RegisterUser2 SUCCESS: mobile=" + data.mobile);
-            socket.emit("AlreadyRegisterd2", {
-              status: "success",
-              message: "Registration successful",
-              name: newUser.name,
-              mobile: newUser.mobile,
-              chips: newUser.chips,
-            });
+          console.log("RegisterUser2 SUCCESS: mobile=" + data.mobile);
+          socket.emit("AlreadyRegisterd2", {
+            status: "success",
+            message: "Registered",
+            name: newUser.name,
+            mobile: newUser.mobile,
+            chips: newUser.chips
           });
         });
+      });
     });
   });
 
@@ -346,120 +372,98 @@ io.on("connection", function (socket) {
   // GET CHIPS
   // ============================================
 
-  socket.on("GetChips", function (data) {
+  socket.on("GetChips", function(data) {
     console.log("GetChips: mobile=" + (data ? data.mobile : "undefined"));
 
     if (!data || !data.mobile) {
-      socket.emit("ChipsData", { status: "error", message: "Mobile required" });
+      socket.emit("ChipsData", { status: "error" });
       return;
     }
 
-    getMongo(function (err, result) {
+    getMongo(function(err, result) {
       if (err) {
-        socket.emit("ChipsData", {
-          status: "error",
-          message: "Database connection failed",
-        });
+        socket.emit("ChipsData", { status: "error" });
         return;
       }
       var dbo = result.dbo;
       var client = result.client;
-      dbo
-        .collection("player")
-        .find({ mobile: String(data.mobile) })
-        .limit(1)
-        .toArray(function (err, result) {
-          client.close();
-          if (err) {
-            console.log("GetChips query error: " + err);
-            socket.emit("ChipsData", {
-              status: "error",
-              message: "Database error",
-            });
-            return;
-          }
-          if (result.length === 0) {
-            console.log("GetChips: no user found for mobile=" + data.mobile);
-            socket.emit("ChipsData", {
-              status: "error",
-              message: "User not found",
-            });
-            return;
-          }
-          var chips = result[0].chips || 0;
-          console.log(
-            "GetChips SUCCESS: mobile=" + data.mobile + " chips=" + chips
-          );
-          socket.emit("ChipsData", { status: "success", chips: chips });
-        });
+      dbo.collection("player").find({ mobile: String(data.mobile) }).limit(1).toArray(function(err, result) {
+        client.close();
+        if (err || result.length === 0) {
+          socket.emit("ChipsData", { status: "error" });
+          return;
+        }
+        console.log("GetChips SUCCESS: mobile=" + data.mobile + " chips=" + (result[0].chips || 0));
+        socket.emit("ChipsData", { status: "success", chips: result[0].chips || 0 });
+      });
     });
   });
 
   // ============================================
-  // GET ALL ROOMS (GetAllDocumentMongoDB)
-  // THE FUNCTION THAT WAS CRASHING - NOW FIXED
+  // GET ALL ROOMS
   // ============================================
 
-  socket.on("GetAllDocumentMongoDB", function (data) {
-    console.log("GetAllDocumentMongoDB: fetching all rooms...");
+  socket.on("GetAllDocumentMongoDB", function(data) {
+    console.log("GetAllDocumentMongoDB: fetching rooms...");
 
-    getMongo(function (err, result) {
+    // If MongoDB is down, use cached or fallback
+    if (!mongoOK && cachedRooms) {
+      sendRoomsToSocket(socket);
+      return;
+    }
+    if (!mongoOK && !cachedRooms) {
+      console.log("GetAllDocumentMongoDB: MongoDB down, using fallback rooms");
+      socket.emit("AllDocumentMongoDB", fallbackRooms);
+      return;
+    }
+
+    // MongoDB is up - fetch fresh
+    getMongo(function(err, result) {
       if (err) {
-        console.log(
-          "GetAllDocumentMongoDB: MongoDB connection FAILED - " + err.message
-        );
-        socket.emit("AllDocumentMongoDB", []);
+        console.log("GetAllDocumentMongoDB: MongoDB error, using fallback");
+        socket.emit("AllDocumentMongoDB", fallbackRooms);
         return;
       }
-
       var dbo = result.dbo;
       var client = result.client;
 
-      dbo
-        .collection("gameSettings")
-        .find({})
-        .toArray(function (err, result) {
-          client.close();
-          if (err) {
-            console.log("GetAllDocumentMongoDB query error: " + err);
-            socket.emit("AllDocumentMongoDB", []);
-            return;
+      dbo.collection("gameSettings").find({}).toArray(function(err, result) {
+        client.close();
+        if (err) {
+          console.log("GetAllDocumentMongoDB query error: " + err);
+          socket.emit("AllDocumentMongoDB", fallbackRooms);
+          return;
+        }
+
+        console.log("GetAllDocumentMongoDB: found " + result.length + " rooms from DB");
+
+        var rooms = [];
+        for (var i = 0; i < result.length; i++) {
+          var r = result[i];
+          var roomId = String(r._id || (i + 1));
+          var pc = 0;
+          if (socketInfo[roomId]) {
+            pc = Object.keys(socketInfo[roomId]).length;
           }
+          rooms.push({
+            id: i + 1,
+            _id: String(r._id),
+            roomName: r.roomName || ("Room " + (i + 1)),
+            betAmount: r.betAmount || 100,
+            maxPlayers: r.maxPlayers || 6,
+            playerCount: pc,
+            banker: r.banker || 0
+          });
+        }
 
-          console.log(
-            "GetAllDocumentMongoDB: found " + result.length + " rooms"
-          );
+        // Update cache
+        if (rooms.length > 0) {
+          cachedRooms = rooms;
+        }
 
-          // Build array with sequential IDs (1,2,3...) instead of MongoDB ObjectIds
-          var rooms = [];
-          for (var i = 0; i < result.length; i++) {
-            var r = result[i];
-            var roomId = String(r._id || i + 1);
-
-            // Count online players in this room from socketInfo
-            var playerCount = 0;
-            if (socketInfo[roomId]) {
-              playerCount = Object.keys(socketInfo[roomId]).length;
-            }
-
-            rooms.push({
-              id: i + 1, // Sequential integer ID, NOT MongoDB ObjectId
-              roomName: r.roomName || "Room " + (i + 1),
-              betAmount: r.betAmount || 100,
-              maxPlayers: r.maxPlayers || 6,
-              playerCount: playerCount,
-              banker: r.banker || 0,
-              _roomId: roomId,
-            });
-          }
-
-          console.log(
-            "GetAllDocumentMongoDB: sending " + rooms.length + " rooms"
-          );
-
-          // Emit as array directly (matching original server format)
-          socket.emit("AllDocumentMongoDB", rooms);
-        });
+        console.log("GetAllDocumentMongoDB: sending " + rooms.length + " rooms");
+        socket.emit("AllDocumentMongoDB", rooms);
+      });
     });
   });
 
@@ -467,36 +471,22 @@ io.on("connection", function (socket) {
   // PLAYER JOIN ROOM
   // ============================================
 
-  socket.on("PlayerJoin", function (data) {
-    console.log(
-      "PlayerJoin: socket=" +
-        socket.id +
-        " roomId=" +
-        (data ? data.roomId : "undefined") +
-        " name=" +
-        (data ? data.name : "undefined") +
-        " mobile=" +
-        (data ? data.mobile : "undefined")
-    );
+  socket.on("PlayerJoin", function(data) {
+    console.log("PlayerJoin: socket=" + socket.id + " roomId=" + (data ? data.roomId : "?") + " name=" + (data ? data.name : "?"));
 
     if (!data || !data.roomId) {
-      console.log("PlayerJoin: missing roomId, aborting");
-      socket.emit("JoinError", { message: "Room ID required" });
+      console.log("PlayerJoin: missing roomId");
       return;
     }
 
     var roomId = String(data.roomId);
 
-    // Initialize room in socketInfo if not exists
     if (!socketInfo[roomId]) {
       socketInfo[roomId] = {};
     }
 
-    // Check if this socket is already in this room
     if (socketInfo[roomId][socket.id]) {
-      console.log(
-        "PlayerJoin: socket " + socket.id + " already in room " + roomId
-      );
+      console.log("PlayerJoin: already in room");
       return;
     }
 
@@ -507,58 +497,36 @@ io.on("connection", function (socket) {
         takenSeats[socketInfo[roomId][sid].seatIndex] = true;
       }
     }
-
     var assignedSeat = 0;
     for (var s = 1; s <= 6; s++) {
-      if (!takenSeats[s]) {
-        assignedSeat = s;
-        break;
-      }
+      if (!takenSeats[s]) { assignedSeat = s; break; }
     }
-
     if (assignedSeat === 0) {
-      console.log("PlayerJoin: room " + roomId + " is full (6/6)");
-      socket.emit("JoinError", { message: "Room is full" });
+      console.log("PlayerJoin: room full");
       return;
     }
 
-    // Store player info
     socketInfo[roomId][socket.id] = {
       name: data.name || "Player",
       mobile: data.mobile || "",
       chips: data.chips || 1000,
       seatIndex: assignedSeat,
-      joinedAt: Date.now(),
+      joinedAt: Date.now()
     };
 
-    // Track room for this socket
     socketRoomMap[socket.id] = roomId;
-
-    // Join Socket.IO room
     socket.join(roomId);
 
     var playerCount = Object.keys(socketInfo[roomId]).length;
-    console.log(
-      "PlayerJoin SUCCESS: " +
-        (data.name || "Player") +
-        " seat=" +
-        assignedSeat +
-        " room=" +
-        roomId +
-        " (" +
-        playerCount +
-        "/6)"
-    );
+    console.log("PlayerJoin SUCCESS: " + (data.name || "Player") + " seat=" + assignedSeat + " room=" + roomId + " (" + playerCount + "/6)");
 
-    // Send confirmation to joining player
     socket.emit("JoinedRoom", {
       status: "success",
       roomId: roomId,
       seatIndex: assignedSeat,
-      playerCount: playerCount,
+      playerCount: playerCount
     });
 
-    // Build player list for the room
     var playerList = [];
     for (var sid2 in socketInfo[roomId]) {
       playerList.push({
@@ -566,25 +534,23 @@ io.on("connection", function (socket) {
         name: socketInfo[roomId][sid2].name,
         mobile: socketInfo[roomId][sid2].mobile,
         chips: socketInfo[roomId][sid2].chips,
-        seatIndex: socketInfo[roomId][sid2].seatIndex,
+        seatIndex: socketInfo[roomId][sid2].seatIndex
       });
     }
 
-    // Notify ALL players in room about updated list
     io.to(roomId).emit("PlayerList", {
       roomId: roomId,
       players: playerList,
-      playerCount: playerCount,
+      playerCount: playerCount
     });
 
-    // Notify others that a new player joined
     socket.broadcast.to(roomId).emit("PlayerJoined", {
       socketId: socket.id,
       name: data.name || "Player",
       mobile: data.mobile || "",
       chips: data.chips || 1000,
       seatIndex: assignedSeat,
-      playerCount: playerCount,
+      playerCount: playerCount
     });
   });
 
@@ -592,47 +558,25 @@ io.on("connection", function (socket) {
   // UPDATE CASH
   // ============================================
 
-  socket.on("Updated_Cash", function (data) {
-    console.log(
-      "Updated_Cash: mobile=" +
-        (data ? data.mobile : "undefined") +
-        " chips=" +
-        (data ? data.chips : "undefined")
-    );
+  socket.on("Updated_Cash", function(data) {
+    console.log("Updated_Cash: mobile=" + (data ? data.mobile : "?") + " chips=" + (data ? data.chips : "?"));
 
-    if (!data || !data.mobile) {
-      console.log("Updated_Cash: missing mobile, aborting");
-      return;
-    }
+    if (!data || !data.mobile) return;
 
     var newChips = Number(data.chips) || 0;
-
-    getMongo(function (err, result) {
-      if (err) {
-        console.log("Updated_Cash: MongoDB error - " + err.message);
-        return;
-      }
+    getMongo(function(err, result) {
+      if (err) { console.log("Updated_Cash: DB error"); return; }
       var dbo = result.dbo;
       var client = result.client;
-      dbo
-        .collection("player")
-        .updateOne(
-          { mobile: String(data.mobile) },
-          { $set: { chips: newChips } },
-          function (err, res) {
-            client.close();
-            if (err) {
-              console.log("Updated_Cash update error: " + err);
-              return;
-            }
-            console.log(
-              "Updated_Cash SUCCESS: mobile=" +
-                data.mobile +
-                " chips=" +
-                newChips
-            );
-          }
-        );
+      dbo.collection("player").updateOne(
+        { mobile: String(data.mobile) },
+        { $set: { chips: newChips } },
+        function(err, res) {
+          client.close();
+          if (err) { console.log("Updated_Cash error: " + err); return; }
+          console.log("Updated_Cash SUCCESS: mobile=" + data.mobile + " chips=" + newChips);
+        }
+      );
     });
   });
 
@@ -640,97 +584,49 @@ io.on("connection", function (socket) {
   // WITHDRAW
   // ============================================
 
-  socket.on("WithdrawMongoDB", function (data) {
-    console.log(
-      "WithdrawMongoDB: mobile=" +
-        (data ? data.mobile : "undefined") +
-        " amount=" +
-        (data ? data.amount : "undefined")
-    );
+  socket.on("WithdrawMongoDB", function(data) {
+    console.log("WithdrawMongoDB: mobile=" + (data ? data.mobile : "?"));
 
     if (!data || !data.mobile) {
-      socket.emit("WithdrawResult", {
-        status: "error",
-        message: "Mobile required",
-      });
+      socket.emit("WithdrawResult", { status: "error", message: "Missing data" });
       return;
     }
 
-    var withdrawAmount = Number(data.amount) || 0;
-
-    getMongo(function (err, result) {
+    var amount = Number(data.amount) || 0;
+    getMongo(function(err, result) {
       if (err) {
-        socket.emit("WithdrawResult", {
-          status: "error",
-          message: "Database connection failed",
-        });
+        socket.emit("WithdrawResult", { status: "error", message: "DB error" });
         return;
       }
       var dbo = result.dbo;
       var client = result.client;
-
-      dbo
-        .collection("player")
-        .find({ mobile: String(data.mobile) })
-        .limit(1)
-        .toArray(function (err, result) {
-          if (err || result.length === 0) {
+      dbo.collection("player").find({ mobile: String(data.mobile) }).limit(1).toArray(function(err, result) {
+        if (err || result.length === 0) {
+          client.close();
+          socket.emit("WithdrawResult", { status: "error" });
+          return;
+        }
+        var current = Number(result[0].chips) || 0;
+        if (current < amount) {
+          client.close();
+          socket.emit("WithdrawResult", { status: "error", message: "Insufficient" });
+          return;
+        }
+        var remaining = current - amount;
+        dbo.collection("player").updateOne(
+          { mobile: String(data.mobile) },
+          { $set: { chips: remaining } },
+          function(err, res) {
             client.close();
-            socket.emit("WithdrawResult", {
-              status: "error",
-              message: "User not found",
-            });
-            return;
+            if (err) {
+              socket.emit("WithdrawResult", { status: "error" });
+              return;
+            }
+            console.log("WithdrawMongoDB SUCCESS: " + data.mobile + " -" + amount + " = " + remaining);
+            socket.emit("WithdrawResult", { status: "success", chips: remaining });
           }
-
-          var currentChips = Number(result[0].chips) || 0;
-          if (currentChips < withdrawAmount) {
-            client.close();
-            console.log(
-              "WithdrawMongoDB: insufficient. Has=" +
-                currentChips +
-                " Wants=" +
-                withdrawAmount
-            );
-            socket.emit("WithdrawResult", {
-              status: "error",
-              message: "Insufficient chips",
-            });
-            return;
-          }
-
-          var newChips = currentChips - withdrawAmount;
-          dbo
-            .collection("player")
-            .updateOne(
-              { mobile: String(data.mobile) },
-              { $set: { chips: newChips } },
-              function (err, res) {
-                client.close();
-                if (err) {
-                  console.log("WithdrawMongoDB update error: " + err);
-                  socket.emit("WithdrawResult", {
-                    status: "error",
-                    message: "Withdraw failed",
-                  });
-                  return;
-                }
-                console.log(
-                  "WithdrawMongoDB SUCCESS: mobile=" +
-                    data.mobile +
-                    " amount=" +
-                    withdrawAmount +
-                    " remaining=" +
-                    newChips
-                );
-                socket.emit("WithdrawResult", {
-                  status: "success",
-                  chips: newChips,
-                  withdrawn: withdrawAmount,
-                });
-              }
-            );
-        });
+        );
+      });
     });
   });
 
@@ -738,32 +634,23 @@ io.on("connection", function (socket) {
   // GET ANNOUNCEMENT
   // ============================================
 
-  socket.on("GetAnnouncement", function (data) {
-    console.log("GetAnnouncement received");
-
-    getMongo(function (err, result) {
+  socket.on("GetAnnouncement", function(data) {
+    console.log("GetAnnouncement");
+    getMongo(function(err, result) {
       if (err) {
-        console.log("GetAnnouncement: MongoDB error - " + err.message);
         socket.emit("Announcement", { message: "Welcome to Shan Koe Mee!" });
         return;
       }
       var dbo = result.dbo;
       var client = result.client;
-
-      dbo
-        .collection("gameSettings")
-        .find({ type: "announcement" })
-        .limit(1)
-        .toArray(function (err, result) {
-          client.close();
-          if (err || result.length === 0) {
-            socket.emit("Announcement", { message: "Welcome to Shan Koe Mee!" });
-            return;
-          }
-          socket.emit("Announcement", {
-            message: result[0].message || "Welcome to Shan Koe Mee!",
-          });
-        });
+      dbo.collection("gameSettings").find({ type: "announcement" }).limit(1).toArray(function(err, result) {
+        client.close();
+        if (err || result.length === 0) {
+          socket.emit("Announcement", { message: "Welcome to Shan Koe Mee!" });
+          return;
+        }
+        socket.emit("Announcement", { message: result[0].message || "Welcome to Shan Koe Mee!" });
+      });
     });
   });
 
@@ -771,24 +658,11 @@ io.on("connection", function (socket) {
   // CHECK CONNECTION
   // ============================================
 
-  socket.on("checkConnection", function (data) {
-    console.log("checkConnection from socket " + socket.id);
-
-    getMongo(function (err, result) {
-      if (err) {
-        console.log("checkConnection: MongoDB error - " + err.message);
-        socket.emit("connectionStatus", {
-          status: "error",
-          message: "Database not connected",
-        });
-        return;
-      }
-      result.client.close();
-      console.log("checkConnection: MongoDB OK");
-      socket.emit("connectionStatus", {
-        status: "ok",
-        message: "Server and database connected",
-      });
+  socket.on("checkConnection", function(data) {
+    console.log("checkConnection from " + socket.id);
+    socket.emit("connectionStatus", {
+      status: mongoOK ? "ok" : "error",
+      message: mongoOK ? "Server and DB connected" : "MongoDB NOT connected"
     });
   });
 
@@ -796,82 +670,56 @@ io.on("connection", function (socket) {
   // GAME ACTIONS
   // ============================================
 
-  socket.on("PlayerBet", function (data) {
-    console.log(
-      "PlayerBet: seat=" +
-        (data ? data.seatIndex : "?") +
-        " amount=" +
-        (data ? data.amount : "?")
-    );
+  socket.on("PlayerBet", function(data) {
     var roomId = socketRoomMap[socket.id];
     if (roomId) {
       socket.broadcast.to(roomId).emit("PlayerBetUpdate", {
         socketId: socket.id,
-        seatIndex: data.seatIndex || 0,
-        amount: data.amount || 0,
+        seatIndex: data ? data.seatIndex : 0,
+        amount: data ? data.amount : 0
       });
     }
   });
 
-  socket.on("PlayerAction", function (data) {
-    console.log(
-      "PlayerAction: seat=" +
-        (data ? data.seatIndex : "?") +
-        " action=" +
-        (data ? data.action : "?")
-    );
+  socket.on("PlayerAction", function(data) {
     var roomId = socketRoomMap[socket.id];
     if (roomId) {
       socket.broadcast.to(roomId).emit("PlayerActionUpdate", {
         socketId: socket.id,
-        seatIndex: data.seatIndex || 0,
-        action: data.action || "",
-        data: data.data || {},
+        seatIndex: data ? data.seatIndex : 0,
+        action: data ? data.action : ""
       });
     }
   });
 
-  socket.on("SendMessage", function (data) {
+  socket.on("SendMessage", function(data) {
     var roomId = socketRoomMap[socket.id];
     if (roomId) {
       io.to(roomId).emit("NewMessage", {
         socketId: socket.id,
         name: data ? data.name : "Player",
         message: data ? data.message : "",
-        time: new Date().toISOString(),
+        time: new Date().toISOString()
       });
     }
   });
 
-  socket.on("GetRoomPlayers", function (data) {
+  socket.on("GetRoomPlayers", function(data) {
     var roomId = String(data ? data.roomId : "");
-    console.log("GetRoomPlayers: roomId=" + roomId);
-
     if (!socketInfo[roomId]) {
-      socket.emit("RoomPlayers", {
-        roomId: roomId,
-        players: [],
-        playerCount: 0,
-      });
+      socket.emit("RoomPlayers", { roomId: roomId, players: [], playerCount: 0 });
       return;
     }
-
-    var playerList = [];
+    var list = [];
     for (var sid in socketInfo[roomId]) {
-      playerList.push({
+      list.push({
         socketId: sid,
         name: socketInfo[roomId][sid].name,
-        mobile: socketInfo[roomId][sid].mobile,
-        chips: socketInfo[roomId][sid].chips,
         seatIndex: socketInfo[roomId][sid].seatIndex,
+        chips: socketInfo[roomId][sid].chips
       });
     }
-
-    socket.emit("RoomPlayers", {
-      roomId: roomId,
-      players: playerList,
-      playerCount: playerList.length,
-    });
+    socket.emit("RoomPlayers", { roomId: roomId, players: list, playerCount: list.length });
   });
 });
 
@@ -880,10 +728,24 @@ io.on("connection", function (socket) {
 // ============================================
 
 var PORT = process.env.PORT || 3000;
-server.listen(PORT, function () {
+
+server.listen(PORT, function() {
   console.log("========================================");
   console.log("Shan Koe Mee Server Started!");
   console.log("Port: " + PORT);
   console.log("MongoDB: " + dbName);
   console.log("========================================");
+
+  // Test MongoDB connection on startup
+  testMongoConnection();
+
+  // Refresh room cache every 30 seconds
+  setInterval(function() {
+    refreshRoomCache();
+  }, 30000);
+
+  // First room cache load after 2 seconds
+  setTimeout(function() {
+    refreshRoomCache();
+  }, 2000);
 });
