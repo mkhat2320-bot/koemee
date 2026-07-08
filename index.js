@@ -55,13 +55,7 @@ var socketInfo = {};
 var clients = [];
 var PLAYER_LIST = {};
 
-// Fallback rooms when MongoDB is unreachable
-var fallbackRooms = [
-  { id: 1, points: 1000, firstprize: 100, commission: 5, lobbyName: "Table 1" },
-  { id: 2, points: 5000, firstprize: 500, commission: 5, lobbyName: "Table 2" },
-  { id: 3, points: 10000, firstprize: 1000, commission: 5, lobbyName: "Table 3" },
-  { id: 4, points: 50000, firstprize: 5000, commission: 5, lobbyName: "Table 4" }
-];
+// No fallback - rooms come only from MongoDB gameSettings collection
 
 // ============================================================
 // MongoDB helper - always safe, never crashes on error
@@ -91,25 +85,7 @@ function getMongo(callback) {
 function sendRoomsToSocket(socket) {
   getMongo(function(err, result) {
     if (err || !result) {
-      // MongoDB failed - send fallback rooms
-      console.log("Using FALLBACK rooms (MongoDB unavailable)");
-      for (var i = 0; i < fallbackRooms.length; i++) {
-        var r = fallbackRooms[i];
-        var roomId = String(r.id);
-        var playerCount = 0;
-        for (var k in socketInfo) {
-          if (socketInfo[k].room === roomId) playerCount++;
-        }
-        socket.emit("GetShan", {
-          id: r.id,
-          points: r.points,
-          firstprize: r.firstprize,
-          players: playerCount,
-          commission: r.commission,
-          lobbyName: r.lobbyName,
-          status: "yes"
-        });
-      }
+      console.log("MongoDB unavailable - no rooms to send");
       return;
     }
 
@@ -118,21 +94,7 @@ function sendRoomsToSocket(socket) {
     dbo.collection("gameSettings").find({}).toArray(function(err2, rooms) {
       client.close();
       if (err2 || !rooms || rooms.length === 0) {
-        // No rooms in DB - send fallback
-        console.log("No rooms in MongoDB, using FALLBACK");
-        for (var i = 0; i < fallbackRooms.length; i++) {
-          var r = fallbackRooms[i];
-          var roomId = String(r.id);
-          var playerCount = 0;
-          for (var k in socketInfo) {
-            if (socketInfo[k].room === roomId) playerCount++;
-          }
-          socket.emit("GetShan", {
-            id: r.id, points: r.points, firstprize: r.firstprize,
-            players: playerCount, commission: r.commission,
-            lobbyName: r.lobbyName, status: "yes"
-          });
-        }
+        console.log("No rooms found in gameSettings collection");
         return;
       }
 
@@ -1772,21 +1734,7 @@ function Updated_Chips2(lSocket, username, chips) {
 function GetAllDocumentMongoDB(data, lSocket) {
   getMongo(function(err, result) {
     if (err) {
-      console.log("GetAllDocumentMongoDB: MongoDB error, sending fallback");
-      // Send fallback rooms
-      for (var i = 0; i < fallbackRooms.length; i++) {
-        var r = fallbackRooms[i];
-        var roomId = String(r.id);
-        var playerCount = 0;
-        for (var k in socketInfo) {
-          if (socketInfo[k].room === roomId) playerCount++;
-        }
-        lSocket.emit("GetShan", {
-          id: r.id, points: r.points, firstprize: r.firstprize,
-          players: playerCount, commission: r.commission,
-          lobbyName: r.lobbyName, status: "yes"
-        });
-      }
+      console.log("GetAllDocumentMongoDB: MongoDB error, no rooms sent");
       return;
     }
     var dbo = result.dbo;
@@ -1794,20 +1742,7 @@ function GetAllDocumentMongoDB(data, lSocket) {
     var empty = 0;
     dbo.collection("gameSettings").find({}).toArray(function (err2, rooms) {
       if (err2) {
-        console.log("GetAllDocumentMongoDB: find error, sending fallback");
-        for (var i = 0; i < fallbackRooms.length; i++) {
-          var r = fallbackRooms[i];
-          var roomId = String(r.id);
-          var playerCount = 0;
-          for (var k in socketInfo) {
-            if (socketInfo[k].room === roomId) playerCount++;
-          }
-          lSocket.emit("GetShan", {
-            id: r.id, points: r.points, firstprize: r.firstprize,
-            players: playerCount, commission: r.commission,
-            lobbyName: r.lobbyName, status: "yes"
-          });
-        }
+        console.log("GetAllDocumentMongoDB: find error, no rooms sent");
         client.close();
         return;
       }
@@ -1831,20 +1766,7 @@ function GetAllDocumentMongoDB(data, lSocket) {
       }
       client.close();
       if (empty == 0) {
-        // No rooms in DB - send fallback
-        for (var i = 0; i < fallbackRooms.length; i++) {
-          var r = fallbackRooms[i];
-          var roomId = String(r.id);
-          var playerCount = 0;
-          for (var k in socketInfo) {
-            if (socketInfo[k].room === roomId) playerCount++;
-          }
-          lSocket.emit("GetShan", {
-            id: r.id, points: r.points, firstprize: r.firstprize,
-            players: playerCount, commission: r.commission,
-            lobbyName: r.lobbyName, status: "yes"
-          });
-        }
+        lSocket.emit("GetShan", { status: "no" });
       }
     });
   });
