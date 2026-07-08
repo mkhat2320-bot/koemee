@@ -1155,8 +1155,22 @@ io.on("connection", function (socket) {
     for (var k in socketInfo) {
       var lSocket = socketInfo[k];
       if (lSocket.room == data.room && lSocket.seat == parseInt(data.seat)) {
-        seatFullChe = false;
-        socket.emit("SeatFull", {});
+        // Seat taken - find next empty seat
+        var foundSeat = 0;
+        for (var trySeat = 1; trySeat <= 6; trySeat++) {
+          var taken = false;
+          for (var k2 in socketInfo) {
+            if (socketInfo[k2].room == data.room && socketInfo[k2].seat == trySeat) taken = true;
+          }
+          if (!taken) { foundSeat = trySeat; break; }
+        }
+        if (foundSeat > 0) {
+          console.log("Seat " + data.seat + " taken, auto-assigned seat " + foundSeat);
+          data.seat = String(foundSeat);
+        } else {
+          seatFullChe = false;
+          socket.emit("SeatFull", {});
+        }
       }
     }
     if (seatFullChe) {
